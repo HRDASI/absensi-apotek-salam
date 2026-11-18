@@ -206,6 +206,7 @@ h1,h2,h3{margin:0}
     <textarea id="catatan" maxlength="300" placeholder="Catatan (opsional), mis. shift malam / tukar jadwal"></textarea>
     <div class="row">
       <button id="retake" class="btn ghost">Ulangi</button>
+      <button id="more" class="btn light hidden">+ Foto</button>
       <button id="send" class="btn primary">Kirim Absen</button>
     </div>
   </div>
@@ -256,6 +257,8 @@ const ICON = {
   pin: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-7-6.2-7-11.5A7 7 0 0 1 19 9.5C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></svg>',
   check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
   warn: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 2 20h20L12 3z"/><path d="M12 10v4M12 17.5v.5"/></svg>',
+  lock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>',
+  unlock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 7.5-2"/></svg>',
   cloud: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18a5 5 0 1 1 .9-9.9A6 6 0 0 1 19 10a4 4 0 0 1-1 7.9"/><path d="M12 12v8M9 15l3-3 3 3"/></svg>'
 };
 
@@ -290,7 +293,6 @@ async function api(action, data, opt) {
   const u = opt.user || user;
   if (u) {
     body.nama = u.nama; body.pin = u.pin; body.perangkat = dev.id; body.model = dev.model;
-    if (u.shiftAktif && body.shift === undefined) body.shift = u.shiftAktif;
   }
   const t0 = performance.now();
   const r = await post(c.u, JSON.stringify(body));
@@ -387,12 +389,12 @@ function toast(msg, ms) {
   const t = $('#toast'); t.textContent = msg; t.classList.remove('hidden'); t.style.opacity = 1;
   clearTimeout(toastT); toastT = setTimeout(() => { t.style.opacity = 0; setTimeout(() => t.classList.add('hidden'), 260); }, ms || 3200);
 }
-let modalClose = null;
+let modalClose = null, modalKunci = false; // modalKunci: jangan tutup saat area gelap diketuk (data belum terkirim)
 function modal(html, onClose) {
   $('#sheet').innerHTML = html; $('#ov').classList.remove('hidden'); modalClose = onClose || null;
 }
-function closeModal() { $('#ov').classList.add('hidden'); const f = modalClose; modalClose = null; if (f) f(); }
-$('#ov').addEventListener('click', e => { if (e.target.id === 'ov') closeModal(); });
+function closeModal() { modalKunci = false; $('#ov').classList.add('hidden'); const f = modalClose; modalClose = null; if (f) f(); }
+$('#ov').addEventListener('click', e => { if (e.target.id === 'ov' && !modalKunci) closeModal(); });
 function alertBox(title, msg) {
   return new Promise(res => {
     modal('<h3>' + esc(title) + '</h3><p>' + msg + '</p><button class="btn primary block" id="mOk">OK</button>', res);
@@ -448,9 +450,10 @@ async function flush(manual) {
       if (it.error && !manual) continue;
       try {
         it.payload.antri = true;
-        const r = await api('absen', it.payload);
+        const r = await api(it.action || 'absen', it.payload);
         await Q.del(it.id); sent++;
         if (r.hariIni) { today = r.hariIni; LS.set('today', today); }
+        if (r.outlet && info) { info.outlet = r.outlet; LS.set('info', info); }
       } catch (e) {
         if (e.net) { setOnline(false); fail = e; break; }
         it.error = e.message; await Q.put(it); fail = e;
@@ -516,8 +519,9 @@ function saranShift(list) {
 }
 function fillShifts() {
   const list = (info && info.shifts) || [];
-  $('#lShiftWrap').classList.toggle('hidden', !list.length);
-  if (!list.length) return;
+  // Shift tidak lagi dipilih saat login (sering lupa logout -> shift salah); dipilih setiap Absen Masuk.
+  $('#lShiftWrap').classList.add('hidden');
+  if (!list.length || true) return;
   const sel = $('#lShift');
   sel.innerHTML = '<option value="">Pilih shift</option>' + list.map(s => '<option value="' + esc(s.nama) + '">' + esc(shiftLabel(s)) + '</option>').join('');
   const sug = saranShift(list); if (sug) sel.value = sug.nama;
@@ -547,7 +551,7 @@ $('#btnLogin').onclick = async () => {
   const b = $('#btnLogin'); b.disabled = true; b.textContent = 'Memeriksa...';
   try {
     const j = await api('login', { shift }, { user: { nama, pin } });
-    user = Object.assign({ pin }, j.user); user.shiftAktif = j.user.shiftAktif || shift;
+    user = Object.assign({ pin }, j.user); user.shiftAktif = '';
     LS.set('user', user); LS.set('lastName', nama);
     info = j; LS.set('info', info); today = j.hariIni; LS.set('today', today);
     startMain();
@@ -605,16 +609,16 @@ function renderHome() {
   const td = todayData();
   const qn = queue.length, qErr = queue.filter(x => x.error).length;
   const allS = (info && info.shifts) || [];
-  const aktif = allS.find(s => s.nama === user.shiftAktif);
-  const jadwal = aktif ? shiftLabel(aktif)
+  // Shift hari ini = shift dari absen masuk hari ini (dipilih saat absen masuk).
+  const aktif = allS.find(s => s.nama === shiftHariIni(td));
+  const jadwal = aktif ? shiftLabel(aktif) + ' (hari ini)'
     : user.jadwal || (user.jamMasuk ? user.jamMasuk + (user.jamPulang ? ' – ' + user.jamPulang : '') : '');
   const box = (lbl, x, cls) => '<div class="box"><span class="small">' + lbl + '</span>' +
     (x ? '<b>' + esc(x.jam) + '</b><span class="chip ' + (/Terlambat|awal|LUAR|PALSU|BERUBAH/.test(x.status) ? 'warn' : 'ok') + '">' + esc(x.status || 'Tercatat') + '</span>'
        : '<b class="muted">--:--</b><span class="small">Belum absen</span>') + '</div>';
   $('#tabHome').innerHTML =
     '<div class="card"><div class="row"><div class="f"><div class="hello">Halo, ' + esc(user.nama) + '</div>' +
-      '<div class="small">' + (jadwal ? 'Shift ' + esc(jadwal) : esc((info && info.apotek) || 'Apotek Salam')) +
-        (allS.length ? ' · <button class="link" id="hShift" style="padding:0">Ganti shift</button>' : '') + '</div></div>' +
+      '<div class="small">' + (jadwal ? 'Shift ' + esc(jadwal) : esc((info && info.apotek) || 'Apotek Salam')) + '</div></div>' +
       (user.peran === 'admin' ? '<span class="chip">Admin</span>' : '') + '</div>' +
       '<div class="clock" id="hClock">--:--<small>:--</small></div><div class="small" id="hDate"></div>' +
       '<div id="hTime" style="margin-top:8px"></div></div>' +
@@ -626,13 +630,140 @@ function renderHome() {
       '<button class="btn orange" id="hOut">' + ICON.out + 'Absen Pulang</button></div>' +
     '<div class="card"><div class="stat"><div class="ico t" id="hLocIco">' + ICON.pin + '</div><div style="flex:1"><b>Lokasi</b><div class="small" id="hLoc">Memeriksa...</div><div id="hLocAct"></div></div></div></div>' +
     '<div class="card"><b>Hari ini</b><div class="small" style="margin-bottom:10px">' + esc(tglPanjang(td.tanggal)) + '</div>' +
-      '<div class="today">' + box('Masuk', td.masuk) + box('Pulang', td.pulang) + '</div></div>';
+      '<div class="today">' + box('Masuk', td.masuk) + box('Pulang', td.pulang) + '</div></div>' +
+    kartuOutlet(td.tanggal);
   lastLocKey = ''; // kartu lokasi baru digambar ulang: paksa isi ulang
+  document.querySelectorAll('[data-outlet]').forEach(b => b.onclick = () => openOutlet(b.dataset.outlet));
   if ($('#hShift')) $('#hShift').onclick = gantiShift;
   $('#hIn').onclick = () => openCam('Masuk');
   $('#hOut').onclick = () => openCam('Pulang');
   if ($('#hFlush')) $('#hFlush').onclick = () => flush(true);
   tickHome();
+}
+
+/* ---------- Shift dipilih saat Absen Masuk ---------- */
+function shiftHariIni(td) {
+  td = td || todayData();
+  if (td.masuk && td.masuk.shift) return td.masuk.shift;
+  const q = queue.filter(x => !x.action && x.payload.jenis === 'Masuk' && x.tanggal === td.tanggal && x.payload.shift)[0];
+  return q ? q.payload.shift : '';
+}
+function pilihShiftMasuk() {
+  const mine = (user.shift && user.shift.length) ? user.shift : ((info && info.shifts) || []);
+  if (!mine.length) return Promise.resolve('');
+  const sug = saranShift(mine);
+  return new Promise(res => {
+    let v = null;
+    modal('<h3>Shift hari ini</h3><p>Pilih shift Anda untuk absen masuk sekarang.</p>' +
+      mine.map(s => '<button class="btn ' + (sug && s.nama === sug.nama ? 'primary' : 'ghost') + ' block" style="margin-bottom:8px" data-s="' + esc(s.nama) + '">' +
+        esc(shiftLabel(s)) + (sug && s.nama === sug.nama ? ' · sesuai jam sekarang' : '') + '</button>').join('') +
+      '<button class="btn light block" id="mNo">Batal</button>', () => res(v));
+    $('#mNo').onclick = closeModal;
+    document.querySelectorAll('#sheet [data-s]').forEach(b => b.onclick = () => { v = b.dataset.s; closeModal(); });
+  }).then(async nm => {
+    if (!nm) return null;
+    const s = mine.find(x => x.nama === nm), o = parts(nowMs(st())), now = +o.hour * 60 + +o.minute, m = s ? menitDari(s.masuk) : null;
+    if (m != null && Math.abs(now - m) > 180 &&
+        !(await confirmBox('Yakin shift ' + esc(nm) + '?', 'Shift ' + esc(nm) + ' mulai pukul <b>' + esc(s.masuk) + '</b>, sekarang pukul <b>' + o.hour + ':' + o.minute + '</b>. Pastikan shift yang dipilih benar.', 'Ya, shift ' + esc(nm)))) return null;
+    return nm;
+  });
+}
+let camShift = '';
+
+/* ---------- Buka & Tutup Outlet ---------- */
+function outletHariIni(tgl) {
+  const o = info && info.outlet;
+  return o && o.tanggal === tgl ? o : { buka: null, tutup: null };
+}
+function kartuOutlet(tgl) {
+  const o = outletHariIni(tgl);
+  const antri = j => queue.some(q => q.action === 'outlet' && q.payload.jenis === j);
+  const baris = (j, x) => '<div class="item"><div class="ico ' + (x ? 'g' : antri(j) ? 'o' : j === 'Buka' ? 't' : 'r') + '">' + (x ? ICON.check : j === 'Buka' ? ICON.unlock : ICON.lock) + '</div>' +
+    '<div class="f"><div class="t">' + j + ' Outlet</div><div class="small">' +
+    (x ? esc(x.jam) + ' · ' + esc(x.nama) + ' · SOP ' + esc(x.lengkap) + (x.belum ? ' ⚠️' : '') : antri(j) ? 'Menunggu dikirim' : 'Belum ada laporan') + '</div></div>' +
+    '<button class="btn ' + (x ? 'ghost' : 'light') + '" data-outlet="' + j + '" style="padding:9px 12px">' + (x ? 'Lapor lagi' : 'Lapor') + '</button></div>';
+  return '<div class="card"><b>Outlet hari ini</b><div class="small">Foto gembok/pintu + checklist SOP, wajib di apotek.</div>' +
+    baris('Buka', o.buka) + baris('Tutup', o.tutup) + '</div>';
+}
+let camMode = 'absen', outletJenis = 'Tutup', outletShots = [];
+async function openOutlet(jenis) {
+  const s = st();
+  if (!s.permCam || !s.permLoc) { askPerm(); toast('Izinkan kamera dan lokasi.'); return; }
+  const x = outletHariIni(todayData().tanggal)[jenis.toLowerCase()];
+  if (x && !(await confirmBox(jenis + ' Outlet sudah dilaporkan', 'Sudah dilaporkan oleh <b>' + esc(x.nama) + '</b> pukul <b>' + esc(x.jam) + '</b>. Kirim laporan lagi?', 'Lapor lagi'))) return;
+  camMode = 'outlet'; outletJenis = jenis; outletShots = []; facing = 'environment';
+  await siapkanKamera(jenis + ' Outlet · foto 1');
+}
+async function simpanFotoOutlet(lagi) {
+  const d = shotData;
+  if (!d) return;
+  shotData = null; // cegah ketuk ganda
+  const blob = await new Promise(r => $('#shot').toBlob(r, 'image/jpeg', 0.8));
+  const buf = await blob.arrayBuffer();
+  const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', buf))].map(x => x.toString(16).padStart(2, '0')).join('');
+  outletShots.push({ foto: b64(buf), hash, d });
+  if (lagi && outletShots.length < 3) {
+    $('#camTitle').textContent = outletJenis + ' Outlet · foto ' + (outletShots.length + 1);
+    $('#shot').classList.add('hidden'); $('#vid').classList.remove('hidden');
+    $('#camReview').classList.add('hidden'); $('#camCtl').classList.remove('hidden'); $('#camInfo').classList.remove('hidden');
+    if (!stream) startStream(); else $('#vid').play().catch(() => {});
+    return;
+  }
+  stopStream(); $('#cam').classList.add('hidden'); shotData = null;
+  checklistOutlet();
+}
+function checklistOutlet() {
+  const jenis = outletJenis, items = ((info && info.sop) || {})[jenis.toLowerCase()] || [];
+  const ck = (id, t) => '<label style="display:flex;align-items:flex-start;gap:12px;font-weight:500;color:var(--ink);font-size:15px;margin:0;padding:10px 0;border-bottom:1px solid var(--line)">' +
+    '<input type="checkbox" id="' + id + '" style="width:22px;height:22px;flex:none;margin:0;accent-color:var(--teal)"> <span>' + t + '</span></label>';
+  modal('<h3>Checklist SOP ' + jenis + ' Outlet</h3><p class="small" style="margin:4px 0 6px">' + outletShots.length + ' foto siap. Centang setiap langkah yang sudah dilakukan.</p>' +
+    (items.length ? items.map((it, i) => ck('oc' + i, esc(it))).join('') : '<p class="small">Daftar SOP belum dimuat (diatur admin di tab "SOP Outlet").</p>') +
+    '<label for="oCat">Catatan</label><textarea id="oCat" class="inp" rows="2" maxlength="300" placeholder="Wajib diisi bila ada langkah yang tidak dilakukan"></textarea>' +
+    '<div id="oErr" class="err hidden"></div>' +
+    '<div class="row" style="margin-top:14px"><button class="btn ghost f" id="oBatal">Batal</button><button class="btn primary f" id="oKirim">Kirim Laporan</button></div>');
+  modalKunci = true;
+  $('#oBatal').onclick = () => {
+    const b = $('#oBatal');
+    if (b.dataset.y) { outletShots = []; closeModal(); return; }
+    b.dataset.y = '1'; b.textContent = 'Yakin? Foto dibuang'; b.classList.add('danger');
+  };
+  $('#oKirim').onclick = async () => {
+    const err = $('#oErr'); err.classList.add('hidden');
+    const cek = items.map((it, i) => ({ item: it, ok: $('#oc' + i).checked }));
+    const catatan = $('#oCat').value.trim();
+    if (cek.some(c => !c.ok) && !catatan) return showErr(err, 'Ada langkah yang belum dicentang. Centang semua, atau tulis alasannya di Catatan.');
+    const d = outletShots[0].d;
+    const payload = {
+      id: d.id, jenis, waktu: d.waktu, waktuHp: d.waktuHp, sumberWaktu: d.sumberWaktu,
+      lat: d.lat, lng: d.lng, acc: d.acc, mock: d.mock, alamat: d.alamat, catatan, cek,
+      fotos: outletShots.map(s => ({ foto: s.foto, hash: s.hash })), antri: false
+    };
+    const item = { id: d.id, nama: user.nama, created: Date.now(), payload, action: 'outlet', label: jenis + ' Outlet', jam: fmtJam(d.waktu), tanggal: ymd(d.waktu) };
+    try { await Q.put(item); } catch (e) { return showErr(err, 'Gagal menyimpan: ' + e.message); }
+    outletShots = [];
+    busy('Mengirim laporan ' + jenis + ' Outlet...');
+    try {
+      const r = await api('outlet', payload);
+      await Q.del(item.id);
+      if (r.outlet) { info.outlet = r.outlet; LS.set('info', info); }
+      await loadQueue(); renderHome();
+      const x = r.rekam || {};
+      modal('<div class="okc">' + ICON.check + '</div><h3 class="center">' + esc(jenis) + ' Outlet terlapor</h3>' +
+        '<p class="center"><b style="font-size:28px">' + esc(x.jam || item.jam) + '</b><br><span class="chip ' + (cek.some(c => !c.ok) ? 'warn' : 'ok') + '">Checklist ' + esc(x.lengkap || '') + '</span>' +
+        (r.telegram ? '<br><span class="small">Terkirim ke grup Telegram</span>' : '') + '</p>' +
+        '<button class="btn primary block" id="mOk">Selesai</button>');
+      $('#mOk').onclick = closeModal;
+    } catch (e) {
+      closeModal();
+      if (e.net) {
+        setOnline(false); await loadQueue(); renderHome();
+        alertBox('Tersimpan di HP', 'Tidak ada internet. Laporan <b>' + esc(jenis) + ' Outlet ' + esc(item.jam) + '</b> akan dikirim otomatis saat internet tersambung.');
+      } else {
+        item.error = e.message; await Q.put(item); await loadQueue(); renderHome();
+        alertBox('Laporan ditolak server', esc(e.message));
+      }
+    }
+  };
 }
 
 function gantiShift() {
@@ -714,12 +845,24 @@ async function openCam(jenis) {
   if (jenis === 'Pulang' && td.pulang && !(await confirmBox('Sudah absen pulang', 'Anda sudah absen pulang pukul <b>' + esc(td.pulang.jam) + '</b>. Absen pulang lagi?', 'Absen lagi'))) return;
   if (jenis === 'Pulang' && !td.masuk && !queue.some(q => q.payload.jenis === 'Masuk') &&
       !(await confirmBox('Belum absen masuk', 'Hari ini belum ada absen masuk. Tetap absen pulang?', 'Tetap absen'))) return;
-  camJenis = jenis; shotData = null;
-  $('#camTitle').textContent = 'Absen ' + jenis;
+  if (jenis === 'Masuk') {
+    const nm = await pilihShiftMasuk();
+    if (nm === null) return;
+    camShift = nm;
+  } else camShift = shiftHariIni(td); // Pulang ikut shift absen masuk (server juga mencocokkan)
+  camMode = 'absen'; camJenis = jenis; facing = 'user';
+  await siapkanKamera('Absen ' + jenis);
+}
+async function siapkanKamera(judul) {
+  const outlet = camMode === 'outlet';
+  shotData = null;
+  $('#camTitle').textContent = judul;
   $('#cam').classList.remove('hidden');
   $('#shot').classList.add('hidden'); $('#vid').classList.remove('hidden');
   $('#camReview').classList.add('hidden'); $('#camCtl').classList.remove('hidden'); $('#camInfo').classList.remove('hidden');
-  $('#catatan').value = '';
+  $('#catatan').value = ''; $('#catatan').classList.toggle('hidden', outlet);
+  $('#send').textContent = outlet ? 'Lanjut: Checklist' : 'Kirim Absen';
+  $('#more').classList.add('hidden');
   if (N) N.resyncTime(); else sinkronJam();
   await startStream();
   tickCam();
@@ -736,7 +879,7 @@ async function startStream() {
   }
 }
 function stopStream() { if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; } }
-function closeCam() { stopStream(); $('#cam').classList.add('hidden'); shotData = null; }
+function closeCam() { stopStream(); $('#cam').classList.add('hidden'); shotData = null; outletShots = []; }
 $('#camClose').onclick = closeCam;
 $('#camFlip').onclick = () => { if (shotData) return; facing = facing === 'user' ? 'environment' : 'user'; startStream(); };
 $('#retake').onclick = () => {
@@ -789,16 +932,17 @@ function tickCam() {
     maybeGeocode(ls.L);
     if (A && !ls.inside) {
       msg = 'Di luar area apotek: ' + fmtM(ls.d) + ' (batas ' + A.radius + ' m)' +
-        (wajibLokasi() ? '. Absen tidak bisa dilakukan.' : isAdmin() ? '. Admin: tetap bisa absen.' : '. Absen akan ditandai.');
-      cls = wajibLokasi() ? 'bad' : 'wait';
-    } else { msg = A ? 'Di area apotek (' + fmtM(ls.d) + ') · siap absen' : 'Lokasi siap (±' + Math.round(ls.L.acc) + ' m)'; cls = 'ok'; }
+        (camMode === 'outlet' ? '. Laporan outlet harus dibuat di apotek.' : wajibLokasi() ? '. Absen tidak bisa dilakukan.' : isAdmin() ? '. Admin: tetap bisa absen.' : '. Absen akan ditandai.');
+      cls = wajibLokasi() || camMode === 'outlet' ? 'bad' : 'wait';
+    } else { msg = A ? 'Di area apotek (' + fmtM(ls.d) + ') · ' + (camMode === 'outlet' ? 'foto gembok / pintu' : 'siap absen') : 'Lokasi siap (±' + Math.round(ls.L.acc) + ' m)'; cls = 'ok'; }
   }
   const sub = [fmtTgl(ms)];
   if (ls.ok) sub.push((alamat ? alamat : ls.L.lat.toFixed(5) + ', ' + ls.L.lng.toFixed(5)));
   sub.push(s.time ? 'Waktu terverifikasi (' + (s.timeSource === 'gps' ? 'GPS' : 'internet') + ')' : 'Waktu belum terverifikasi');
   $('#camInfo').innerHTML = '<div class="ct">' + fmtJam(ms) + '</div><div class="cs">' + sub.map(esc).join('<br>') + '</div><div class="camMsg ' + cls + '">' + esc(msg) + '</div>' + pesanTerang(ukurTerang());
-  $('#shutter').disabled = !(ls.ok && !(A && !ls.inside && wajibLokasi()));
+  $('#shutter').disabled = !(ls.ok && !(A && !ls.inside && harusDiLokasi()));
 }
+const harusDiLokasi = () => camMode === 'outlet' || wajibLokasi(); // laporan outlet: semua orang termasuk admin
 
 function rr(ctx, x, y, w, h, r) {
   ctx.beginPath(); ctx.moveTo(x + r, y); ctx.lineTo(x + w - r, y); ctx.quadraticCurveTo(x + w, y, x + w, y + r);
@@ -860,9 +1004,9 @@ function drawStamp(ctx, W, H, d) {
   ctx.fillStyle = '#fff'; ctx.font = font('600', 25); ctx.shadowBlur = 4 * s;
   ctx.fillText(fmtTgl(d.waktu), bx + 18 * s, y + 8 * s);
   ctx.shadowBlur = 0;
-  const label = 'ABSEN ' + d.jenis.toUpperCase() + (d.shift ? ' · SHIFT ' + d.shift.toUpperCase() : '');
+  const label = d.label || 'ABSEN ' + d.jenis.toUpperCase() + (d.shift ? ' · SHIFT ' + d.shift.toUpperCase() : '');
   ctx.font = font('700', 21); const lbw = ctx.measureText(label).width + 22 * s;
-  ctx.fillStyle = d.jenis === 'Masuk' ? '#0FADA6' : '#F5A01A'; rr(ctx, bx + 18 * s, y + 44 * s, lbw, 34 * s, 8 * s); ctx.fill();
+  ctx.fillStyle = d.label ? (d.jenis === 'Buka' ? '#1C9A5E' : '#C0392B') : d.jenis === 'Masuk' ? '#0FADA6' : '#F5A01A'; rr(ctx, bx + 18 * s, y + 44 * s, lbw, 34 * s, 8 * s); ctx.fill();
   ctx.fillStyle = '#fff'; ctx.fillText(label, bx + 29 * s, y + 51 * s);
   y += timeH;
   ctx.shadowBlur = 4 * s;
@@ -880,7 +1024,7 @@ function uuid() {
 $('#shutter').onclick = async () => {
   const s = st(), ls = locState(s), A = apotekLoc();
   if (!ls.ok) return toast(ls.msg);
-  if (A && !ls.inside && wajibLokasi()) return toast('Anda di luar area apotek.');
+  if (A && !ls.inside && harusDiLokasi()) return toast('Anda di luar area apotek.');
   const terang = ukurTerang();
   if (terang != null && terang < BATAS_GELAP &&
       !(await confirmBox('Foto terlalu gelap', 'Wajah Anda mungkin tidak terlihat jelas di foto absen. Nyalakan lampu atau hadapkan wajah ke cahaya, lalu foto lagi.', 'Tetap ambil'))) return;
@@ -893,8 +1037,10 @@ $('#shutter').onclick = async () => {
   const ctx = c.getContext('2d');
   ctx.save(); if (facing === 'user') { ctx.translate(W, 0); ctx.scale(-1, 1); } ctx.drawImage(v, 0, 0, W, H); ctx.restore();
   const s2 = st();
+  const outlet = camMode === 'outlet';
   shotData = {
-    id: uuid(), jenis: camJenis, nama: user.nama, shift: user.shiftAktif || '',
+    id: uuid(), jenis: outlet ? outletJenis : camJenis, nama: user.nama, shift: outlet ? '' : camShift,
+    label: outlet ? (outletJenis === 'Buka' ? 'BUKA OUTLET' : 'TUTUP OUTLET · TERKUNCI') : '',
     waktu: nowMs(s2), waktuHp: s2.deviceTime, sumberWaktu: s2.time ? s2.timeSource : '',
     lat: ls.L.lat, lng: ls.L.lng, acc: ls.L.acc, mock: !!ls.L.mock,
     jarak: ls.d, inside: ls.inside, alamat: alamat && alamatAt && jarak(ls.L.lat, ls.L.lng, alamatAt.lat, alamatAt.lng) < 150 ? alamat : ''
@@ -903,7 +1049,9 @@ $('#shutter').onclick = async () => {
   v.pause();
   c.classList.remove('hidden'); v.classList.add('hidden');
   $('#camCtl').classList.add('hidden'); $('#camInfo').classList.add('hidden'); $('#camReview').classList.remove('hidden');
+  $('#more').classList.toggle('hidden', !outlet || outletShots.length >= 2);
 };
+$('#more').onclick = () => simpanFotoOutlet(true);
 
 function b64(buf) {
   const bytes = new Uint8Array(buf); let s = '';
@@ -912,6 +1060,7 @@ function b64(buf) {
 }
 $('#send').onclick = async () => {
   if (!shotData) return;
+  if (camMode === 'outlet') return simpanFotoOutlet(false);
   const btn = $('#send'); btn.disabled = true;
   try {
     const blob = await new Promise(r => $('#shot').toBlob(r, 'image/jpeg', 0.82));
@@ -961,7 +1110,7 @@ async function renderHist() {
   let html = '';
   if (queue.length) {
     html += '<div class="dateHead">Belum terkirim</div><div class="card">' + queue.map(q =>
-      '<div class="item"><div class="ico ' + (q.error ? 'r' : 'o') + '">' + (q.error ? ICON.warn : ICON.cloud) + '</div><div class="f"><div class="t">' + esc(q.payload.jenis) + ' · ' + esc(q.jam) + '</div>' +
+      '<div class="item"><div class="ico ' + (q.error ? 'r' : 'o') + '">' + (q.error ? ICON.warn : ICON.cloud) + '</div><div class="f"><div class="t">' + esc(q.label || q.payload.jenis) + ' · ' + esc(q.jam) + '</div>' +
       '<div class="small">' + esc(tglPanjang(q.tanggal)) + '</div>' + (q.error ? '<div class="small" style="color:var(--red)">' + esc(q.error) + '</div>' : '<div class="small">Menunggu internet</div>') + '</div>' +
       (q.error ? '<button class="link" data-del="' + esc(q.id) + '">Hapus</button>' : '') + '</div>').join('') +
       '<button class="btn light block" id="qSend" style="margin-top:8px">Kirim ulang sekarang</button></div>';
